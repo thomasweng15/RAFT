@@ -20,6 +20,8 @@ import evaluate
 import datasets
 
 from torch.utils.tensorboard import SummaryWriter
+import yaml
+import random
 
 try:
     from torch.cuda.amp import GradScaler
@@ -39,20 +41,25 @@ except:
 
 
 # exclude extremly large displacements
-MAX_FLOW = 400
+# MAX_FLOW = 500
 SUM_FREQ = 100
 VAL_FREQ = 5000
+# VAL_FREQ = 100
 
 
-def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
+# def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8, max_flow=MAX_FLOW):
+def sequence_loss(flow_preds, flow_gt, valid, gamma=0.8):
     """ Loss function defined over sequence of flow predictions """
 
     n_predictions = len(flow_preds)    
     flow_loss = 0.0
 
-    # exlude invalid pixels and extremely large diplacements
-    mag = torch.sum(flow_gt**2, dim=1).sqrt()
-    valid = (valid >= 0.5) & (mag < max_flow)
+    # exclude invalid pixels and extremely large diplacements
+    # mag = torch.sum(flow_gt**2, dim=1).sqrt()
+    # valid = (valid >= 0.5) & (mag < max_flow)
+    valid = (valid >= 0.5)
+    # if torch.any(mag >= max_flow):
+        # print("max flow reached")
 
     for i in range(n_predictions):
         i_weight = gamma**(n_predictions - i - 1)
@@ -134,6 +141,15 @@ class Logger:
 
 
 def train(args):
+    # Towel config
+    with open('config.yaml') as f:
+        cfg = yaml.load(f, Loader=yaml.FullLoader)
+
+    seed = cfg['seed']
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
 
     model = nn.DataParallel(RAFT(args), device_ids=args.gpus)
     print("Parameter Count: %d" % count_parameters(model))
@@ -144,10 +160,35 @@ def train(args):
     model.cuda()
     model.train()
 
-    if args.stage != 'chairs':
-        model.module.freeze_bn()
+    # if args.stage != 'chairs' : 
+        # model.module.freeze_bn()
 
-    train_loader = datasets.fetch_dataloader(args)
+    # Towel related parameters
+    # camera_params = {'default_camera': { 'pos': np.array([-0.0, 0.45, 0.0]),
+    camera_params = {'default_camera': { 'pos': np.array([-0.0, 0.65, 0.0]),
+                     'angle': np.array([0, -np.pi/2., 0.]),
+                     'width': 720,
+                     'height': 720}}
+
+    # Train/val split needs to happen outside dataset class
+    # to avoid random nobs switch from using val images
+    datapath = f'{cfg["basepath"]}/{cfg["dataname"]}'
+    fs = sorted([int(fn.split('_')[0])
+                for fn in os.listdir(f'{datapath}/rendered_images') 
+                if 'before' in fn])
+    random.shuffle(fs)
+    train_fs = fs
+
+    datapath = f'{cfg["basepath"]}/{cfg["valname"]}'
+    fs = sorted([int(fn.split('_')[0])
+                for fn in os.listdir(f'{datapath}/rendered_images') 
+                if 'before' in fn])
+    val_fs = fs[:1000]
+    # print(val_fs)
+    # train_fs = fs[:int(len(fs)*0.8)]
+    # val_fs = fs[int(len(fs)*0.8):]
+
+    train_loader = datasets.fetch_dataloader(args, cfg, train_fs, camera_params)
     optimizer, scheduler = fetch_optimizer(args, model)
 
     total_steps = 0
@@ -155,7 +196,9 @@ def train(args):
     logger = Logger(model, scheduler)
 
     VAL_FREQ = 5000
-    add_noise = True
+    # VAL_FREQ = 1
+    # add_noise = True
+    add_noise = False # note used anyway since it's in args
 
     should_keep_training = True
     while should_keep_training:
@@ -194,12 +237,15 @@ def train(args):
                         results.update(evaluate.validate_sintel(model.module))
                     elif val_dataset == 'kitti':
                         results.update(evaluate.validate_kitti(model.module))
+                    elif val_dataset == 'towel':
+                        print("VALIDATING ")
+                        results.update(evaluate.validate_towel(model.module, cfg, val_fs, camera_params, plot=args.plot, iters=args.iters))
 
                 logger.write_dict(results)
                 
                 model.train()
-                if args.stage != 'chairs':
-                    model.module.freeze_bn()
+                # if args.stage != 'chairs':
+                    # model.module.freeze_bn()
             
             total_steps += 1
 
@@ -236,10 +282,14 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', type=float, default=0.0)
     parser.add_argument('--gamma', type=float, default=0.8, help='exponential weighting')
     parser.add_argument('--add_noise', action='store_true')
+    parser.add_argument('--n_workers', type=int, default=4)
+    parser.add_argument('--spatial_aug', action='store_true')
+    parser.add_argument('--switchobs', action='store_true')
+    parser.add_argument('--plot', action='store_true')
     args = parser.parse_args()
 
-    torch.manual_seed(1234)
-    np.random.seed(1234)
+    # torch.manual_seed(1234)
+    # np.random.seed(1234)
 
     if not os.path.isdir('checkpoints'):
         os.mkdir('checkpoints')

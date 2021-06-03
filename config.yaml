@@ -1,0 +1,72 @@
+
+seed: 20
+
+basepath: /data/fabric_data/replay_data/
+# dataname: sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0
+dataname: biman_towel_actpickplace_n10000_h2_co1_am0.9_tc0.5_cam0.65
+valname: biman_towel_actpickplace_n1000_h2_co1_am0.9_tc0.5_cam0.65
+
+epochs: 2
+epochsperval: 1
+batch: 8
+wtdecay: 0.0001
+lrsched: True
+
+gpu: 1
+n_workers: 32
+csvlogs: csv
+tblogs: tb
+lr: 0.0001
+
+aug: True
+switch_obs: 0.5
+spatial_aug: 0.9
+sim2real_aug: 0.0
+
+# debug: False
+# finetune: False
+
+# output_dir: /data/fabric_data/trained_models/flow
+
+# model_suffix: '_biastest'
+
+# epochs: 10000
+# eval_interval: 1
+# # max_iters: 1000 # end epoch after 5k iterations
+# max_buf: 7200 # max training buf
+# # max_buf: 95000 # max training buf
+# n_val: 2000
+# # dataset_path: /data/fabric_data/replay_data/
+# # # run_name: sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0
+# # run_name: sg_towel_actcorlbaseline_n22000_edgethresh5_ontable0
+# num_workers: 32
+
+# lrsched: false
+# loss: 2
+# # normalize: False
+
+# random_nobs_prob: 0.5 # 0.5
+# switch_obs: 0.5 # 0.5
+# loss_scale: 1.0 # 2
+# spatial_aug: 0.9
+
+# # scale_mean: 0.0
+# sim2real_aug: 0.0
+# offset_ampl: 0.02
+# gauss_kern: 9
+# perlin: 0.9
+# perlin_kernel: 8 # 5 # 8# 10 
+# perlin_ampl: 0.07 # 0.1 # 0.02 # 0.01
+
+# batch: 8
+# learn_rate: 0.0001
+# weight_decay: 0.0001
+
+# # adam
+# beta1: 0.9
+# beta2: 0.999
+
+# model: 'flownets' # flownets
+
+# # Centering?
+# # Sampling background / weighting loss on background?

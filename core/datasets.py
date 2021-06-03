@@ -14,6 +14,298 @@ import os.path as osp
 from utils import frame_utils
 from utils.augmentor import FlowAugmentor, SparseFlowAugmentor
 
+import cv2
+from flow import GTFlow, remove_dups
+import torchvision.transforms as T
+import torchvision.transforms.functional as TF
+import matplotlib.pyplot as plt
+from copy import deepcopy
+from PIL import Image
+
+class TowelTest(data.Dataset):
+    def __init__(self, config, camera_params, foldtype='unfold', datatype='sim'):
+        self.camera_params = camera_params
+        self.datatype = datatype
+        self.flw = GTFlow()
+        # self.plot = plot
+
+        self.eval_combos = [['open_2side_high', f'towel_train_{i}_high'] for i in range(32)]
+
+        # if foldtype == 'all':
+        #     self.eval_combos = [
+        #         ['open_2side', 'one_corner_in_2side'],
+        #         ['open_2side', 'opp_corners_in_2side'],
+        #         ['open_2side', 'all_corners_in_2side'],
+        #         ['open_2side', 'triangle_2side'],
+        #         ['one_corner_in_2side', 'open_2side'],
+        #         ['opp_corners_in_2side', 'open_2side'],
+        #         ['all_corners_in_2side', 'open_2side'],
+        #         ['triangle_2side', 'open_2side']]
+        # elif foldtype == 'fold':
+        #     self.eval_combos = [
+        #         ['open_2side', 'one_corner_in_2side'],
+        #         ['open_2side', 'opp_corners_in_2side'],
+        #         ['open_2side', 'all_corners_in_2side'],
+        #         ['open_2side', 'triangle_2side']]
+        # elif foldtype == 'unfold':
+        #     self.eval_combos = [
+        #         ['one_corner_in_2side', 'open_2side'],
+        #         ['opp_corners_in_2side', 'open_2side'],
+        #         ['all_corners_in_2side', 'open_2side'],
+        #         ['triangle_2side', 'open_2side']]
+    
+    def __len__(self):
+        return len(self.eval_combos)
+
+    # def load_depth(self, name):
+    #     if self.datatype == 'sim':
+    #         depth = np.load(f'/data/fabric_data/sim2real/real_gray/{name}_gray.npy')[0] / 1000
+    #         depth = depth[90:-80, 150:-180].astype(np.float32) # 310 x 310
+    #         mask = (depth == 0).astype(np.uint8)
+    #         depth = cv2.inpaint(depth, mask, 3, cv2.INPAINT_NS)
+    #         depth = cv2.resize(depth, (200, 200))
+    #     elif self.datatype == 'real':
+    #         depth = np.load(f'/data/fabric_data/sim2real/real_gray/{name}_gray.npy')[0] / 1000
+    #         depth = depth[90:-80, 150:-180].astype(np.float32) # 310 x 310
+    #         mask = (depth == 0).astype(np.uint8)
+    #         depth = cv2.inpaint(depth, mask, 3, cv2.INPAINT_NS)
+    #         depth = cv2.resize(depth, (200, 200))
+    #     elif self.datatype == 'gan':
+    #         depth = cv2.imread(f'/data/fabric_data/cyclegan/testB_output/clothcyclegan_maskdrpng/test_latest/images/{name}_gray_fake.png')[:, :, 0] # 256 x 256
+    #         depth = depth / 255.0
+    #         depth = cv2.resize(depth, (200, 200))
+    #         # import IPython; IPython.embed()
+    #     return depth
+
+    # def __getitem__(self, index):
+    #     start_fn, goal_fn = self.eval_combos[index]
+    #     depth_o = self.load_depth(start_fn)
+    #     depth_n = self.load_depth(goal_fn)
+
+    #     # Load mask
+
+    #     return depth_o, depth_n
+
+    def __getitem__(self, index):
+        start_fn, goal_fn = self.eval_combos[index]
+        path = '/home/exx/projects/softagent/descriptors_softgym_baseline'
+
+        depth_o = cv2.imread(f'{path}/goals/{start_fn}_depth.png')[:, :, 0] / 255 # 200 x 200
+        cloth_mask = (depth_o != 0).astype(float) # 200 x 200
+
+        if not os.path.exists(f'{path}/goals/particles/{start_fn}_uvnodups.npy'):
+            coords_o = np.load(f'{path}/goals/particles/{start_fn}.npy')
+            uv_o_f = np.load(f'{path}/goals/particles/{start_fn}_uv.npy')
+            # if self.cfg['dataname'] == 'sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0':
+            # uv_o_f[:,[1,0]] = uv_o_f[:,[0,1]] # knots axes are flipped in collect_data
+            
+            # Remove occlusions
+            depth_o_rs = cv2.resize(depth_o, (720, 720))
+            uv_o = remove_dups(self.camera_params, uv_o_f, coords_o, depth_o_rs, zthresh=0.005)
+            np.save(f'{path}/goals/particles/{start_fn}_uvnodups.npy', uv_o)
+        else:
+            uv_o = np.load(f'{path}/goals/particles/{start_fn}_uvnodups.npy')
+        
+        # Load nobs and knots
+        # With probablity p, sample image pair as obs and nobs, otherwise choose random nobs
+        depth_n = cv2.imread(f'{path}/goals/{goal_fn}_depth.png')[:, :, 0] / 255
+        uv_n_f = np.load(f'{path}/goals/particles/{goal_fn}_uv.npy')
+        # if self.cfg['dataname'] == 'sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0':
+        # uv_n_f[:,[1,0]] = uv_n_f[:,[0,1]] # knots axes are flipped in collect_data
+
+        # Remove out of bounds
+        uv_o[uv_o < 0] = float('NaN')
+        uv_o[uv_o >= 720] = float('NaN')
+
+         # Get flow image
+        flow_lbl = self.flw.get_image(uv_o, uv_n_f, mask=cloth_mask, depth_o=depth_o, depth_n=depth_n)
+
+        # Get loss mask
+        valid = np.zeros((flow_lbl.shape[0], flow_lbl.shape[1]), dtype=np.float32)
+        non_nan_idxs = np.rint(uv_o[~np.isnan(uv_o).any(axis=1)]/719*199).astype(int)
+        valid[non_nan_idxs[:, 0], non_nan_idxs[:, 1]] = 1
+
+        if False:
+            im1 = depth_o
+            im2 = depth_n
+            # flow_im = flow_pr.squeeze().permute(1, 2, 0).cpu().numpy()
+            # mask = im1 == 0
+            # flow_im[mask, :] = 0
+            fig, ax = plt.subplots(1, 4, figsize=(16, 8))
+            ax[0].imshow(im1)
+            ax[1].imshow(im2)
+            
+            skip = 1
+            h, w, _ = flow_lbl.shape
+            ax[2].imshow(np.zeros((h, w)), alpha=0.5)
+            ys, xs, _ = np.where(flow_lbl != 0)
+            ax[2].quiver(xs[::skip], ys[::skip],
+                        flow_lbl[ys[::skip], xs[::skip], 1], flow_lbl[ys[::skip], xs[::skip], 0], 
+                        alpha=0.8, color='white', angles='xy', scale_units='xy', scale=1)
+
+            ax[3].imshow(valid)
+
+            # skip = 1
+            # flow_gt = flow_lbl
+            # # flow_gt = flow_gt.permute(1, 2, 0).numpy()
+            # ax[3].imshow(np.zeros((h, w)), alpha=0.5)
+            # ys, xs, _ = np.where(flow_gt != 0)
+            # ax[3].quiver(xs[::skip], ys[::skip],
+            #             flow_gt[ys[::skip], xs[::skip], 1], flow_gt[ys[::skip], xs[::skip], 0], 
+            #             alpha=0.8, color='white', angles='xy', scale_units='xy', scale=1)
+
+            plt.tight_layout()
+            plt.show()
+
+        depth1 = torch.from_numpy(depth_o).unsqueeze(2).permute(2, 0, 1).float()
+        depth2 = torch.from_numpy(depth_n).unsqueeze(2).permute(2, 0, 1).float()
+        flow = torch.from_numpy(flow_lbl).permute(2, 0, 1).float()
+        valid = torch.from_numpy(valid).float()
+        return depth1, depth2, flow, valid
+        
+
+class Towel(data.Dataset):
+    def __init__(self, cfg, ids, camera_params, aug_params=None, sparse=True, spatialaug=False, switchobs=False, stage='train'):
+        self.augmentor = None
+        self.sparse = sparse
+        self.spatialaug = spatialaug
+        self.switchobs = switchobs
+        if aug_params is not None:
+            if sparse:
+                self.augmentor = SparseFlowAugmentor(**aug_params)
+            else:
+                self.augmentor = FlowAugmentor(**aug_params)
+        
+        self.is_test = False
+        self.init_seed = False
+        self.flow_list = []
+        self.image_list = []
+
+        self.camera_params = camera_params
+        self.cfg = cfg
+        dataname = 'dataname' if stage=='train' else 'valname'
+        self.data_path = f"{self.cfg['basepath']}/{self.cfg[dataname]}"
+        self.transform = T.Compose([T.ToTensor()])
+        self.flw = GTFlow()
+
+        self.ids = ids
+
+    def __len__(self):
+        return len(self.ids)
+
+    def __getitem__(self, index):
+        if not self.init_seed:
+            worker_info = torch.utils.data.get_worker_info()
+            if worker_info is not None:
+                torch.manual_seed(worker_info.id)
+                np.random.seed(worker_info.id)
+                random.seed(worker_info.id)
+                self.init_seed = True
+
+        index = self.ids[index]
+
+        switch = self.switchobs and torch.rand(1) < 0.5
+        obs_suffix = 'after' if switch else 'before'
+        nobs_suffix = 'before' if switch else 'after'
+
+        # Load obs and knots
+        depth_o = np.load(f'{self.data_path}/rendered_images/{str(index).zfill(6)}_depth_{obs_suffix}.npy')
+        cloth_mask = (depth_o != 0).astype(float) # 200 x 200
+
+        if not os.path.exists(f'{self.data_path}/knots/{str(index).zfill(6)}_knotsnodups_{obs_suffix}.npy'):
+            coords_o = np.load(f'{self.data_path}/coords/{str(index).zfill(6)}_coords_{obs_suffix}.npy')
+            uv_o_f = np.load(f'{self.data_path}/knots/{str(index).zfill(6)}_knots_{obs_suffix}.npy')
+            # if self.cfg['dataname'] == 'sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0':
+            uv_o_f[:,[1,0]] = uv_o_f[:,[0,1]] # knots axes are flipped in collect_data
+            
+            # Remove occlusions
+            depth_o_rs = cv2.resize(depth_o, (720, 720))
+            uv_o = remove_dups(self.camera_params, uv_o_f, coords_o, depth_o_rs, zthresh=0.001)
+            np.save(f'{self.data_path}/knots/{str(index).zfill(6)}_knotsnodups_{obs_suffix}.npy', uv_o)
+        else:
+            uv_o = np.load(f'{self.data_path}/knots/{str(index).zfill(6)}_knotsnodups_{obs_suffix}.npy')
+
+        # Load nobs and knots
+        # With probablity p, sample image pair as obs and nobs, otherwise choose random nobs
+        depth_n = np.load(f'{self.data_path}/rendered_images/{str(index).zfill(6)}_depth_{nobs_suffix}.npy')
+        uv_n_f = np.load(f'{self.data_path}/knots/{str(index).zfill(6)}_knots_{nobs_suffix}.npy')
+        # if self.cfg['dataname'] == 'sg_towel_actcorlbaseline_n2200_edgethresh5_actmask0.9_ceratio0.5_ontable0':
+        uv_n_f[:,[1,0]] = uv_n_f[:,[0,1]] # knots axes are flipped in collect_data
+
+        # Spatial aug
+        if self.spatialaug and torch.rand(1) < 0.9:
+            depth_o = Image.fromarray(depth_o)
+            depth_n = Image.fromarray(depth_n)
+            cloth_mask = Image.fromarray(cloth_mask)
+            depth_o, depth_n, cloth_mask, uv_o, uv_n_f = self.spatial_aug(depth_o, depth_n, cloth_mask, uv_o, uv_n_f)
+            depth_o = np.array(depth_o)
+            depth_n = np.array(depth_n)
+        cloth_mask = np.array(cloth_mask, dtype=bool)
+
+        # Remove out of bounds
+        uv_o[uv_o < 0] = float('NaN')
+        uv_o[uv_o >= 720] = float('NaN')
+
+        # Get flow image
+        flow_lbl = self.flw.get_image(uv_o, uv_n_f, mask=cloth_mask, depth_o=depth_o, depth_n=depth_n)
+
+        # Get loss mask
+        valid = np.zeros((flow_lbl.shape[0], flow_lbl.shape[1]), dtype=np.float32)
+        non_nan_idxs = np.rint(uv_o[~np.isnan(uv_o).any(axis=1)]/719*199).astype(int)
+        valid[non_nan_idxs[:, 0], non_nan_idxs[:, 1]] = 1
+
+        if False:
+            im1 = depth_o
+            im2 = depth_n
+            # flow_im = flow_pr.squeeze().permute(1, 2, 0).cpu().numpy()
+            # mask = im1 == 0
+            # flow_im[mask, :] = 0
+            fig, ax = plt.subplots(1, 4, figsize=(16, 8))
+            ax[0].imshow(im1)
+            ax[1].imshow(im2)
+            
+            skip = 1
+            h, w, _ = flow_lbl.shape
+            ax[2].imshow(np.zeros((h, w)), alpha=0.5)
+            ys, xs, _ = np.where(flow_lbl != 0)
+            ax[2].quiver(xs[::skip], ys[::skip],
+                        flow_lbl[ys[::skip], xs[::skip], 1], flow_lbl[ys[::skip], xs[::skip], 0], 
+                        alpha=0.8, color='white', angles='xy', scale_units='xy', scale=1)
+
+            ax[3].imshow(valid)
+
+            plt.tight_layout()
+            plt.show()
+
+        depth1 = torch.from_numpy(depth_o).unsqueeze(2).permute(2, 0, 1).float()
+        depth2 = torch.from_numpy(depth_n).unsqueeze(2).permute(2, 0, 1).float()
+        flow = torch.from_numpy(flow_lbl).permute(2, 0, 1).float()
+        valid = torch.from_numpy(valid).float()
+        return depth1, depth2, flow, valid
+
+    def aug_uv(self, uv, angle, dx, dy):
+        uvt = deepcopy(uv)
+        rad = np.deg2rad(angle)
+        R = np.array([
+            [np.cos(rad), -np.sin(rad)],
+            [np.sin(rad), np.cos(rad)]])
+        uvt -= 719 / 2
+        uvt = np.dot(R, uvt.T).T
+        uvt += 719 / 2
+        uvt[:, 1] += dx
+        uvt[:, 0] += dy
+        return uvt
+
+    def spatial_aug(self, depth_o, depth_n, cloth_mask, uv_o, uv_n_f):
+        angle = int(torch.randint(low=-5, high=6, size=(1,)).numpy()[0])
+        dx = int(torch.randint(low=-5, high=6, size=(1,)).numpy()[0])
+        dy = int(torch.randint(low=-5, high=6, size=(1,)).numpy()[0])
+        depth_o = TF.affine(depth_o, angle=angle, translate=(dx, dy), scale=1.0, shear=0)
+        depth_n = TF.affine(depth_n, angle=angle, translate=(dx, dy), scale=1.0, shear=0)
+        cloth_mask = TF.affine(cloth_mask, angle=angle, translate=(dx, dy), scale=1.0, shear=0)
+        uv_o = self.aug_uv(uv_o, -angle, dx/199*719, dy/199*719)
+        uv_n_f = self.aug_uv(uv_n_f, -angle, dx/199*719, dy/199*719)
+        return depth_o, depth_n, cloth_mask, uv_o, uv_n_f
 
 class FlowDataset(data.Dataset):
     def __init__(self, aug_params=None, sparse=False):
@@ -196,7 +488,7 @@ class HD1K(FlowDataset):
             seq_ix += 1
 
 
-def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
+def fetch_dataloader(args, cfg, ids, camera_params, TRAIN_DS='C+T+K+S+H'):
     """ Create the data loader for the corresponding trainign set """
 
     if args.stage == 'chairs':
@@ -227,8 +519,13 @@ def fetch_dataloader(args, TRAIN_DS='C+T+K+S+H'):
         aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.4, 'do_flip': False}
         train_dataset = KITTI(aug_params, split='training')
 
+    elif args.stage == 'towel':
+        # aug_params = {'crop_size': args.image_size, 'min_scale': -0.2, 'max_scale': 0.4, 'do_flip': False}
+        aug_params = None
+        train_dataset = Towel(cfg, ids, camera_params, aug_params, spatialaug=args.spatial_aug, switchobs=args.switchobs, stage='train')
+
     train_loader = data.DataLoader(train_dataset, batch_size=args.batch_size, 
-        pin_memory=False, shuffle=True, num_workers=4, drop_last=True)
+        pin_memory=False, shuffle=True, num_workers=args.n_workers, drop_last=True)
 
     print('Training with %d image pairs' % len(train_dataset))
     return train_loader
